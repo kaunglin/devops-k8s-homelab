@@ -1,0 +1,22 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs (if script is run from repo dir)
+*.log
+homelab-*.log
+
+# Local overrides or secrets (if added later)
+.env
+.env.local
+*.local
+
+# Temporary / generated (script uses /tmp; ignore if any end up here)
+/tmp/
