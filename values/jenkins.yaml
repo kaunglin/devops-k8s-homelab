@@ -1,0 +1,33 @@
+# Jenkins Helm values. Extracted from homelab.sh so the config is reviewable.
+# Admin password is set here for the lab; change it before exposing Jenkins.
+controller:
+  adminUser: admin
+  adminPassword: homelab123
+  serviceType: ClusterIP
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "1500m"
+      memory: "2Gi"
+  javaOpts: "-Xms512m -Xmx1024m"
+  installPlugins:
+    - kubernetes:latest
+    - workflow-aggregator:latest
+    - git:latest
+    - configuration-as-code:latest
+    - blueocean:latest
+    - docker-workflow:latest
+persistence:
+  enabled: true
+  size: 5Gi
+agent:
+  enabled: true
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"

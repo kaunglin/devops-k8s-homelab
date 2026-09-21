@@ -1,0 +1,13 @@
+# Argo CD Helm values.
+#
+# server.insecure is on because nginx terminates in front of it over plain
+# HTTP at argocd.local; without it the server redirects to HTTPS and loops.
+#
+# The admin password is NOT here. Set ARGOCD_ADMIN_PASSWORD in .env and the
+# script layers a generated bcrypt hash on top of this file at install time.
+server:
+  service:
+    type: ClusterIP
+configs:
+  params:
+    server.insecure: true

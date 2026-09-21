@@ -43,7 +43,7 @@ You get an interactive menu. Cluster status (RUNNING / STOPPED / NOT RUNNING) is
 | **3** – Show cluster status | Nodes, `kubectl top nodes`, `kubectl top pods -A`, non-Running pods, LoadBalancer services. |
 | **4** – Stop cluster | Stop the kind node containers (cluster persists; use Start to resume). |
 | **5** – Start cluster | Start the kind node containers and wait for nodes to be Ready. |
-| **6** – Uninstall optional components | Remove ArgoCD, Jenkins, and/or Prometheus + Grafana (and their namespaces). Core is not removed. |
+| **6** – Manage components | Per component: install/upgrade, **suspend** (scale to 0 — frees memory, keeps all data), **resume**, or **remove** (helm uninstall + delete namespace). Core is never touched. |
 | **7** – Teardown | Delete the cluster and cleanup temp files. All data is lost. |
 | **8** – Exit | Quit the script. |
 
@@ -59,6 +59,51 @@ For ArgoCD, Jenkins, and Grafana to resolve, add to `/etc/hosts`:
 ```
 
 The script prints a reminder and the exact lines after setup or when adding components.
+
+## Suspend vs remove
+
+**Suspend is the everyday action.** Scaling a component to zero frees its
+memory just as completely as uninstalling does, but keeps its PersistentVolume
+Claims, configuration and state. Jenkins keeps its jobs, build history, plugins
+and credentials; Prometheus keeps its metrics. The original replica counts are
+recorded in a `homelab-suspended-replicas` annotation and restored on resume.
+
+**Remove is deliberate and destructive.** It runs `helm uninstall` and deletes
+the namespace, taking any PVCs in it with them. Use it to rehearse a clean
+install, not to reclaim memory.
+
+Removing Argo CD first strips the `resources-finalizer.argocd.argoproj.io`
+finalizer from every Application. Without that the namespace hangs in
+`Terminating` forever — Helm has already removed the controller that would
+clear the finalizer — and a controller still running would cascade-delete every
+workload those Applications manage. Removing Argo CD leaves deployed
+applications running.
+
+## Adding a component
+
+Components are rows in the `COMPONENTS` array near the top of `homelab.sh`:
+
+```
+key|display|release|namespace|repo_name|repo_url|chart|version|values|hosts
+```
+
+Add a row, drop an optional values file in `values/`, and the component appears
+in the menus, the status list and the `/etc/hosts` reminder automatically. No
+new functions, no menu edits.
+
+Two optional hooks cover anything component-specific:
+
+| Hook | Purpose |
+|------|---------|
+| `dynamic_values_<key>` | Echo a path to an extra values file, merged after the static one (used to inject Argo CD's bcrypt password hash). |
+| `post_install_<key>` | Runs after a successful install — create an Ingress, wait for pods, print credentials. |
+
+Helm values live in `values/` rather than inline in the script, so they can be
+reviewed and diffed:
+
+- `values/argocd.yaml`
+- `values/jenkins.yaml`
+- `values/monitoring.yaml`
 
 ## Configuration
 

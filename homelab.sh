@@ -398,355 +398,327 @@ install_metrics_server() {
 }
 
 # ─────────────────────────────────────────────
-#  OPTIONAL: ARGOCD
+#  COMPONENT REGISTRY
 # ─────────────────────────────────────────────
-install_argocd() {
-  print_section "Installing ArgoCD"
+# One row per optional component. Adding a component means adding a row here
+# and, if it needs configuration, a file under values/ — no new functions and
+# no menu edits. Anything component-specific goes in an optional hook:
+#   dynamic_values_<key>   echo a path to an extra values file (merged last)
+#   post_install_<key>     runs after a successful install
+#
+#   key|display|release|namespace|repo_name|repo_url|chart|version|values|hosts
+COMPONENTS=(
+  "argocd|ArgoCD (GitOps CD)|argocd|${NS_ARGOCD}|argo|https://argoproj.github.io/argo-helm|argo/argo-cd|${ARGOCD_HELM_VERSION}|argocd.yaml|argocd.local"
+  "jenkins|Jenkins (CI)|jenkins|${NS_JENKINS}|jenkins|https://charts.jenkins.io|jenkins/jenkins|${JENKINS_HELM_VERSION}|jenkins.yaml|jenkins.local"
+  "monitoring|Prometheus + Grafana|kube-prometheus-stack|${NS_MONITORING}|prometheus-community|https://prometheus-community.github.io/helm-charts|prometheus-community/kube-prometheus-stack|${PROM_STACK_HELM_VERSION}|monitoring.yaml|grafana.local,prometheus.local"
+)
 
-  helm repo add argo https://argoproj.github.io/argo-helm --force-update &>/dev/null
-  helm repo update &>/dev/null
-  ensure_namespace "$NS_ARGOCD"
+# Annotation used to remember replica counts across a suspend/resume cycle.
+SUSPEND_ANNOTATION="homelab-suspended-replicas"
 
-  # Always write a values file (empty is fine) so the helm call stays a single
-  # fixed shape -- bash 3.2 on macOS cannot expand an empty array under set -u.
-  local pass_mode="random"
-  : > /tmp/argocd-values.yaml
-  if [[ -n "${ARGOCD_ADMIN_PASSWORD:-}" ]]; then
-    if command -v htpasswd &>/dev/null; then
-      local pw_hash pw_mtime
-      pw_hash=$(htpasswd -nbBC 10 "" "$ARGOCD_ADMIN_PASSWORD" | tr -d ':\n' | sed 's/^\$2y/\$2a/')
-      pw_mtime=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-      cat <<EOF > /tmp/argocd-values.yaml
+# Set by select_components; consumed by setup_cluster / add_components.
+SELECTED_COMPONENTS=""
+
+component_keys() {
+  local row
+  for row in "${COMPONENTS[@]}"; do echo "${row%%|*}"; done
+}
+
+component_field() {  # $1=key  $2=1-based field index
+  local key=$1 idx=$2 row
+  for row in "${COMPONENTS[@]}"; do
+    if [[ "${row%%|*}" == "$key" ]]; then
+      echo "$row" | cut -d'|' -f"$idx"
+      return 0
+    fi
+  done
+  return 1
+}
+
+component_key_at() {  # $1=1-based menu position
+  component_keys | sed -n "${1}p"
+}
+
+# installed | suspended | absent
+component_status() {
+  local key=$1 ns release running
+  release=$(component_field "$key" 3)
+  ns=$(component_field "$key" 4)
+  if ! helm list -n "$ns" -q 2>/dev/null | grep -qx "$release"; then
+    echo "absent"; return 0
+  fi
+  running=$(kubectl get deploy,statefulset -n "$ns" \
+    -o jsonpath='{range .items[*]}{.spec.replicas}{"\n"}{end}' 2>/dev/null | grep -vx '0' | head -1)
+  if [[ -z "$running" ]]; then echo "suspended"; else echo "installed"; fi
+}
+
+component_status_label() {
+  case "$(component_status "$1")" in
+    installed) echo -e "${GREEN}INSTALLED${NC}" ;;
+    suspended) echo -e "${YELLOW}SUSPENDED${NC}" ;;
+    *)         echo -e "${RED}NOT INSTALLED${NC}" ;;
+  esac
+}
+
+component_hosts() {  # every *.local host this component serves, one per line
+  component_field "$1" 10 | tr ',' '\n' | grep -v '^$' || true
+}
+
+# ─────────────────────────────────────────────
+#  COMPONENT-SPECIFIC HOOKS
+# ─────────────────────────────────────────────
+# Argo CD's admin password: bcrypt the plaintext from .env and hand Helm only
+# the hash. Without ARGOCD_ADMIN_PASSWORD, Argo CD keeps its random default.
+dynamic_values_argocd() {
+  [[ -z "${ARGOCD_ADMIN_PASSWORD:-}" ]] && return 0
+  if ! command -v htpasswd &>/dev/null; then
+    warn "htpasswd not found - falling back to ArgoCD's random password" >&2
+    return 0
+  fi
+  local pw_hash pw_mtime out=/tmp/homelab-argocd-secret.yaml
+  pw_hash=$(htpasswd -nbBC 10 "" "$ARGOCD_ADMIN_PASSWORD" | tr -d ':\n' | sed 's/^\$2y/\$2a/')
+  pw_mtime=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  cat <<EOF > "$out"
 configs:
   secret:
     argocdServerAdminPassword: "${pw_hash}"
     argocdServerAdminPasswordMtime: "${pw_mtime}"
 EOF
-      pass_mode="fixed"
-      log "Using ARGOCD_ADMIN_PASSWORD from .env (bcrypt hash passed to Helm)"
-    else
-      warn "htpasswd not found - falling back to ArgoCD's random password"
-      log "htpasswd missing; ARGOCD_ADMIN_PASSWORD ignored"
-    fi
-  fi
-
-  helm upgrade --install argocd argo/argo-cd \
-    --namespace "$NS_ARGOCD" \
-    --version "$ARGOCD_HELM_VERSION" \
-    --values /tmp/argocd-values.yaml \
-    --set server.service.type=ClusterIP \
-    --set configs.params."server\.insecure"=true \
-    --wait \
-    --timeout 5m \
-    &>/dev/null && success "ArgoCD installed"
-
-  # Create Ingress for ArgoCD
-  kubectl apply -f - <<EOF &>/dev/null
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: argocd-ingress
-  namespace: ${NS_ARGOCD}
-  annotations:
-    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: argocd.local
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: argocd-server
-                port:
-                  number: 80
-EOF
-
-  wait_for_pods "$NS_ARGOCD" "app.kubernetes.io/name=argocd-server" 180
-
-  local argocd_pass
-  if [[ "$pass_mode" == "fixed" ]]; then
-    argocd_pass="(from ARGOCD_ADMIN_PASSWORD in .env - unchanged across reinstalls)"
-  else
-    argocd_pass=$(kubectl -n "$NS_ARGOCD" get secret argocd-initial-admin-secret \
-      -o jsonpath="{.data.password}" 2>/dev/null | base64 -d 2>/dev/null || echo "run: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d")
-  fi
-
-  success "ArgoCD ready"
-  echo ""
-  echo -e "    ${BOLD}ArgoCD Credentials:${NC}"
-  echo -e "    URL      : ${YELLOW}http://argocd.local${NC}"
-  echo -e "    Username : ${YELLOW}admin${NC}"
-  echo -e "    Password : ${YELLOW}${argocd_pass}${NC}"
+  echo "$out"
 }
 
-# ─────────────────────────────────────────────
-#  OPTIONAL: JENKINS
-# ─────────────────────────────────────────────
-install_jenkins() {
-  print_section "Installing Jenkins"
-
-  helm repo add jenkins https://charts.jenkins.io --force-update &>/dev/null
-  helm repo update &>/dev/null
-  ensure_namespace "$NS_JENKINS"
-
-  cat <<EOF > /tmp/jenkins-values.yaml
-controller:
-  adminUser: admin
-  adminPassword: homelab123
-  serviceType: ClusterIP
-  resources:
-    requests:
-      cpu: "500m"
-      memory: "1Gi"
-    limits:
-      cpu: "1500m"
-      memory: "2Gi"
-  javaOpts: "-Xms512m -Xmx1024m"
-  installPlugins:
-    - kubernetes:latest
-    - workflow-aggregator:latest
-    - git:latest
-    - configuration-as-code:latest
-    - blueocean:latest
-    - docker-workflow:latest
-persistence:
-  enabled: true
-  size: 5Gi
-agent:
-  enabled: true
-  resources:
-    requests:
-      cpu: "200m"
-      memory: "256Mi"
-    limits:
-      cpu: "500m"
-      memory: "512Mi"
-EOF
-
-  helm upgrade --install jenkins jenkins/jenkins \
-    --namespace "$NS_JENKINS" \
-    --version "$JENKINS_HELM_VERSION" \
-    --values /tmp/jenkins-values.yaml \
-    --wait \
-    --timeout 8m \
-    &>/dev/null && success "Jenkins installed"
-
-  # Create Ingress for Jenkins
+create_ingress() {  # $1=name $2=namespace $3=host $4=service $5=port
   kubectl apply -f - <<EOF &>/dev/null
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: jenkins-ingress
-  namespace: ${NS_JENKINS}
+  name: $1
+  namespace: $2
   annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
     nginx.ingress.kubernetes.io/proxy-body-size: "0"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
 spec:
   ingressClassName: nginx
   rules:
-    - host: jenkins.local
+    - host: $3
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: jenkins
+                name: $4
                 port:
-                  number: 8080
+                  number: $5
 EOF
+}
 
+post_install_argocd() {
+  create_ingress argocd-ingress "$NS_ARGOCD" argocd.local argocd-server 80
+  wait_for_pods "$NS_ARGOCD" "app.kubernetes.io/name=argocd-server" 180
+  local pass
+  if [[ -n "${ARGOCD_ADMIN_PASSWORD:-}" ]] && command -v htpasswd &>/dev/null; then
+    pass="(ARGOCD_ADMIN_PASSWORD from .env - stable across reinstalls)"
+  else
+    pass=$(kubectl -n "$NS_ARGOCD" get secret argocd-initial-admin-secret \
+      -o jsonpath="{.data.password}" 2>/dev/null | base64 -d 2>/dev/null \
+      || echo "kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d")
+  fi
+  echo ""
+  echo -e "    ${BOLD}ArgoCD:${NC}  ${YELLOW}http://argocd.local${NC}  admin / ${YELLOW}${pass}${NC}"
+}
+
+post_install_jenkins() {
+  create_ingress jenkins-ingress "$NS_JENKINS" jenkins.local jenkins 8080
   wait_for_pods "$NS_JENKINS" "app.kubernetes.io/component=jenkins-controller" 300
-
-  success "Jenkins ready"
   echo ""
-  echo -e "    ${BOLD}Jenkins Credentials:${NC}"
-  echo -e "    URL      : ${YELLOW}http://jenkins.local${NC}"
-  echo -e "    Username : ${YELLOW}admin${NC}"
-  echo -e "    Password : ${YELLOW}homelab123${NC}"
+  echo -e "    ${BOLD}Jenkins:${NC} ${YELLOW}http://jenkins.local${NC}  admin / ${YELLOW}homelab123${NC}"
 }
 
-# ─────────────────────────────────────────────
-#  OPTIONAL: PROMETHEUS + GRAFANA
-# ─────────────────────────────────────────────
-install_monitoring() {
-  print_section "Installing Prometheus + Grafana"
-
-  helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update &>/dev/null
-  helm repo update &>/dev/null
-  ensure_namespace "$NS_MONITORING"
-
-  cat <<EOF > /tmp/prom-values.yaml
-grafana:
-  adminPassword: homelab123
-  service:
-    type: ClusterIP
-  ingress:
-    enabled: true
-    ingressClassName: nginx
-    hosts:
-      - grafana.local
-    paths:
-      - /
-  resources:
-    requests:
-      memory: "256Mi"
-      cpu: "100m"
-    limits:
-      memory: "512Mi"
-      cpu: "500m"
-
-prometheus:
-  ingress:
-    enabled: true
-    ingressClassName: nginx
-    annotations:
-      nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    hosts:
-      - prometheus.local
-    paths:
-      - /
-  prometheusSpec:
-    resources:
-      requests:
-        memory: "512Mi"
-        cpu: "200m"
-      limits:
-        memory: "1Gi"
-        cpu: "500m"
-    retention: 3d
-    storageSpec:
-      volumeClaimTemplate:
-        spec:
-          accessModes: ["ReadWriteOnce"]
-          resources:
-            requests:
-              storage: 5Gi
-
-alertmanager:
-  enabled: false
-
-nodeExporter:
-  enabled: true
-
-kubeStateMetrics:
-  enabled: true
-EOF
-
-  helm upgrade --install kube-prometheus-stack \
-    prometheus-community/kube-prometheus-stack \
-    --namespace "$NS_MONITORING" \
-    --version "$PROM_STACK_HELM_VERSION" \
-    --values /tmp/prom-values.yaml \
-    --wait \
-    --timeout 8m \
-    &>/dev/null && success "Prometheus + Grafana installed"
-
+post_install_monitoring() {
+  # Grafana and Prometheus ingresses come from values/monitoring.yaml
   wait_for_pods "$NS_MONITORING" "app.kubernetes.io/name=grafana" 180
-
-  success "Grafana ready"
   echo ""
-  echo -e "    ${BOLD}Grafana Credentials:${NC}"
-  echo -e "    URL      : ${YELLOW}http://grafana.local${NC}"
-  echo -e "    Username : ${YELLOW}admin${NC}"
-  echo -e "    Password : ${YELLOW}homelab123${NC}"
-  echo ""
-  echo -e "    ${BOLD}Prometheus:${NC}"
-  echo -e "    URL      : ${YELLOW}http://prometheus.local${NC}"
+  echo -e "    ${BOLD}Grafana:${NC}    ${YELLOW}http://grafana.local${NC}  admin / ${YELLOW}homelab123${NC}"
+  echo -e "    ${BOLD}Prometheus:${NC} ${YELLOW}http://prometheus.local${NC}"
 }
 
 # ─────────────────────────────────────────────
-#  UNINSTALL OPTIONAL COMPONENTS
+#  INSTALL / SUSPEND / RESUME / REMOVE
 # ─────────────────────────────────────────────
-uninstall_argocd() {
-  print_section "Uninstalling ArgoCD"
-  if helm list -n "$NS_ARGOCD" -q 2>/dev/null | grep -qx "argocd"; then
-    helm uninstall argocd --namespace "$NS_ARGOCD" --wait 2>/dev/null && \
-      success "ArgoCD uninstalled" || warn "Helm uninstall had issues"
-    kubectl delete namespace "$NS_ARGOCD" --timeout=60s 2>/dev/null || true
-  else
-    info "ArgoCD is not installed (nothing to uninstall)"
+install_component() {
+  local key=$1
+  local display release ns repo_name repo_url chart version values base overlay
+  display=$(component_field "$key" 2);  release=$(component_field "$key" 3)
+  ns=$(component_field "$key" 4);       repo_name=$(component_field "$key" 5)
+  repo_url=$(component_field "$key" 6); chart=$(component_field "$key" 7)
+  version=$(component_field "$key" 8);  values=$(component_field "$key" 9)
+
+  print_section "Installing ${display}"
+  log "Installing ${key} (chart=${chart} version=${version} ns=${ns})"
+
+  helm repo add "$repo_name" "$repo_url" --force-update &>/dev/null
+  helm repo update &>/dev/null
+  ensure_namespace "$ns"
+
+  base=""
+  [[ -n "$values" && -f "${SCRIPT_DIR}/values/${values}" ]] && base="${SCRIPT_DIR}/values/${values}"
+  overlay=""
+  if declare -f "dynamic_values_${key}" >/dev/null; then
+    overlay=$("dynamic_values_${key}")
   fi
-}
 
-uninstall_jenkins() {
-  print_section "Uninstalling Jenkins"
-  if helm list -n "$NS_JENKINS" -q 2>/dev/null | grep -qx "jenkins"; then
-    helm uninstall jenkins --namespace "$NS_JENKINS" --wait 2>/dev/null && \
-      success "Jenkins uninstalled" || warn "Helm uninstall had issues"
-    kubectl delete namespace "$NS_JENKINS" --timeout=120s 2>/dev/null || true
+  # Explicit branches instead of an args array: bash 3.2 on macOS cannot
+  # expand an empty array under set -u.
+  info "Running helm upgrade --install ${release} (this can take a few minutes)..."
+  local rc=0
+  if [[ -n "$base" && -n "$overlay" ]]; then
+    helm upgrade --install "$release" "$chart" --namespace "$ns" --version "$version" \
+      --values "$base" --values "$overlay" --wait --timeout 10m &>/dev/null || rc=$?
+  elif [[ -n "$base" ]]; then
+    helm upgrade --install "$release" "$chart" --namespace "$ns" --version "$version" \
+      --values "$base" --wait --timeout 10m &>/dev/null || rc=$?
   else
-    info "Jenkins is not installed (nothing to uninstall)"
+    helm upgrade --install "$release" "$chart" --namespace "$ns" --version "$version" \
+      --wait --timeout 10m &>/dev/null || rc=$?
   fi
-}
-
-uninstall_monitoring() {
-  print_section "Uninstalling Prometheus + Grafana"
-  if helm list -n "$NS_MONITORING" -q 2>/dev/null | grep -qx "kube-prometheus-stack"; then
-    helm uninstall kube-prometheus-stack --namespace "$NS_MONITORING" --wait 2>/dev/null && \
-      success "Prometheus + Grafana uninstalled" || warn "Helm uninstall had issues"
-    kubectl delete namespace "$NS_MONITORING" --timeout=120s 2>/dev/null || true
-  else
-    info "Prometheus + Grafana is not installed (nothing to uninstall)"
-  fi
-}
-
-select_components_to_uninstall() {
-  echo ""
-  echo -e "  ${BOLD}Select optional components to uninstall:${NC}"
-  echo ""
-  echo -e "  ${CYAN}[1]${NC} ArgoCD"
-  echo -e "  ${CYAN}[2]${NC} Jenkins"
-  echo -e "  ${CYAN}[3]${NC} Prometheus + Grafana (Monitoring)"
-  echo -e "  ${CYAN}[4]${NC} All of the above"
-  echo -e "  ${CYAN}[5]${NC} Cancel"
-  echo ""
-  read -rp "  Enter your choices (e.g. 1 2 or 4): " choices
-
-  if echo " $choices " | grep -q ' 5 '; then
-    info "Uninstall cancelled."
+  if [[ $rc -ne 0 ]]; then
+    fail "${display} install failed. Check: helm status ${release} -n ${ns}"
+    log "${key} install FAILED"
     return 1
   fi
+  success "${display} installed"
+  log "${key} installed"
 
-  UNINSTALL_ARGOCD=false
-  UNINSTALL_JENKINS=false
-  UNINSTALL_MONITORING=false
-
-  for choice in $choices; do
-    case $choice in
-      1) UNINSTALL_ARGOCD=true ;;
-      2) UNINSTALL_JENKINS=true ;;
-      3) UNINSTALL_MONITORING=true ;;
-      4) UNINSTALL_ARGOCD=true; UNINSTALL_JENKINS=true; UNINSTALL_MONITORING=true ;;
-      *) warn "Unknown option: $choice (skipping)" ;;
-    esac
-  done
+  [[ -n "$overlay" ]] && rm -f "$overlay"
+  if declare -f "post_install_${key}" >/dev/null; then "post_install_${key}"; fi
   return 0
 }
 
-uninstall_components() {
-  if ! kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
-    fail "Cluster '${CLUSTER_NAME}' does not exist or is stopped. Start the cluster first."
-    return 1
+# Scale every workload in the namespace to zero, remembering the replica count.
+# Frees the memory exactly like uninstalling, but keeps PVCs, config and state.
+suspend_component() {
+  local key=$1 display ns obj reps
+  display=$(component_field "$key" 2); ns=$(component_field "$key" 4)
+  print_section "Suspending ${display}"
+  log "Suspending ${key} (scaling ${ns} workloads to 0)"
+
+  for obj in $(kubectl get deploy,statefulset -n "$ns" -o name 2>/dev/null); do
+    reps=$(kubectl get "$obj" -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null)
+    [[ -z "$reps" || "$reps" == "0" ]] && continue
+    kubectl annotate "$obj" -n "$ns" "${SUSPEND_ANNOTATION}=${reps}" --overwrite &>/dev/null
+    kubectl scale "$obj" -n "$ns" --replicas=0 &>/dev/null && \
+      success "${obj} scaled to 0 (was ${reps})"
+  done
+  success "${display} suspended - data and configuration kept"
+  info "Resume from this menu; nothing was deleted."
+}
+
+resume_component() {
+  local key=$1 display ns obj reps
+  display=$(component_field "$key" 2); ns=$(component_field "$key" 4)
+  print_section "Resuming ${display}"
+  log "Resuming ${key}"
+
+  for obj in $(kubectl get deploy,statefulset -n "$ns" -o name 2>/dev/null); do
+    reps=$(kubectl get "$obj" -n "$ns" \
+      -o jsonpath="{.metadata.annotations['${SUSPEND_ANNOTATION}']}" 2>/dev/null)
+    [[ -z "$reps" ]] && reps=1
+    kubectl scale "$obj" -n "$ns" --replicas="$reps" &>/dev/null && \
+      success "${obj} scaled to ${reps}"
+  done
+  success "${display} resuming - give the pods a moment to become Ready"
+}
+
+uninstall_component() {
+  local key=$1 display release ns app
+  display=$(component_field "$key" 2); release=$(component_field "$key" 3)
+  ns=$(component_field "$key" 4)
+
+  print_section "Removing ${display}"
+  if ! helm list -n "$ns" -q 2>/dev/null | grep -qx "$release"; then
+    info "${display} is not installed (nothing to remove)"
+    return 0
   fi
 
+  # Argo CD Applications carry resources-finalizer.argocd.argoproj.io. Deleting
+  # the namespace with those still set hangs it in Terminating forever, because
+  # helm uninstall has already removed the controller that would clear them --
+  # and a controller that is still alive would cascade-delete every workload the
+  # Applications manage. Strip them first: removing Argo CD must never take the
+  # deployed applications down with it.
+  if [[ "$key" == "argocd" ]]; then
+    for app in $(kubectl get applications -n "$ns" -o name 2>/dev/null); do
+      kubectl patch "$app" -n "$ns" --type merge \
+        -p '{"metadata":{"finalizers":null}}' &>/dev/null && \
+        info "cleared finalizer on ${app} (its workloads keep running)"
+    done
+  fi
+
+  helm uninstall "$release" --namespace "$ns" --wait &>/dev/null && \
+    success "${display} uninstalled" || warn "Helm uninstall reported problems"
+  kubectl delete namespace "$ns" --timeout=120s &>/dev/null || \
+    warn "Namespace ${ns} did not delete cleanly - check for stuck finalizers"
+  success "${display} removed"
+  log "${key} removed"
+}
+
+# ─────────────────────────────────────────────
+#  COMPONENT MENU
+# ─────────────────────────────────────────────
+manage_components() {
+  if ! kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
+    fail "Cluster '${CLUSTER_NAME}' is not running. Start it first."
+    return 1
+  fi
   kubectl config use-context "kind-${CLUSTER_NAME}" &>/dev/null
 
-  print_section "Uninstall Optional Components"
-  echo -e "  ${WARN} This will remove the selected components and their data (e.g. Jenkins jobs, Grafana dashboards).${NC}"
-  echo ""
+  local key i sel action count
+  while true; do
+    print_section "Manage Components"
+    echo ""
+    i=1
+    for key in $(component_keys); do
+      printf "  ${CYAN}[%d]${NC} %-26s %b\n" "$i" "$(component_field "$key" 2)" "$(component_status_label "$key")"
+      i=$((i + 1))
+    done
+    count=$((i - 1))
+    echo ""
+    echo -e "  ${CYAN}[b]${NC} Back to main menu"
+    echo ""
+    read -rp "  Select a component [1-${count}/b]: " sel
+    [[ "$sel" == "b" || "$sel" == "B" ]] && return 0
+    if ! echo "$sel" | grep -qE '^[0-9]+$' || [ "$sel" -lt 1 ] || [ "$sel" -gt "$count" ]; then
+      warn "Invalid selection"; continue
+    fi
+    key=$(component_key_at "$sel")
 
-  select_components_to_uninstall || return 0
-
-  $UNINSTALL_ARGOCD    && uninstall_argocd
-  $UNINSTALL_JENKINS   && uninstall_jenkins
-  $UNINSTALL_MONITORING && uninstall_monitoring
-
-  print_section "Uninstall complete"
-  success "Selected components have been uninstalled."
+    echo ""
+    echo -e "  ${BOLD}$(component_field "$key" 2)${NC} is currently $(component_status_label "$key")"
+    echo ""
+    echo -e "  ${CYAN}[i]${NC} Install / upgrade"
+    echo -e "  ${CYAN}[s]${NC} Suspend      (scale to 0 - frees memory, keeps all data)"
+    echo -e "  ${CYAN}[r]${NC} Resume       (scale back up)"
+    echo -e "  ${CYAN}[x]${NC} Remove       (helm uninstall + delete namespace)"
+    echo -e "  ${CYAN}[c]${NC} Cancel"
+    echo ""
+    read -rp "  Action: " action
+    case "$action" in
+      i|I) install_component "$key"; print_hosts_reminder ;;
+      s|S) suspend_component "$key" ;;
+      r|R) resume_component "$key" ;;
+      x|X)
+        echo ""
+        warn "This deletes the $(component_field "$key" 4) namespace and any PersistentVolumeClaims in it."
+        warn "Suspend instead if you only want the memory back."
+        read -rp "  Type 'remove' to confirm: " confirm
+        [[ "$confirm" == "remove" ]] && uninstall_component "$key" || info "Cancelled"
+        ;;
+      *) info "Cancelled" ;;
+    esac
+    echo ""
+    read -rp "  Press Enter to continue..." _
+  done
 }
 
 # ─────────────────────────────────────────────
@@ -757,10 +729,12 @@ print_hosts_reminder() {
   echo -e "  Add these lines to ${BOLD}/etc/hosts${NC} if not already present:"
   echo ""
   echo -e "  ${YELLOW}sudo bash -c 'cat >> /etc/hosts << EOF"
-  echo "127.0.0.1  argocd.local"
-  echo "127.0.0.1  jenkins.local"
-  echo "127.0.0.1  grafana.local"
-  echo "127.0.0.1  prometheus.local"
+  local _key _host
+  for _key in $(component_keys); do
+    for _host in $(component_hosts "$_key"); do
+      echo "127.0.0.1  ${_host}"
+    done
+  done
   echo -e "EOF'${NC}"
   echo ""
 }
@@ -885,26 +859,34 @@ select_components() {
   echo ""
   echo -e "  ${BOLD}Select optional components to install:${NC}"
   echo ""
-  echo -e "  ${CYAN}[1]${NC} ArgoCD           (GitOps CD)"
-  echo -e "  ${CYAN}[2]${NC} Jenkins          (CI pipelines)"
-  echo -e "  ${CYAN}[3]${NC} Prometheus + Grafana (Monitoring)"
-  echo -e "  ${CYAN}[4]${NC} All of the above"
-  echo -e "  ${CYAN}[5]${NC} None (core only: MetalLB + Ingress + Metrics-Server)"
+  local _key _i=1
+  for _key in $(component_keys); do
+    echo -e "  ${CYAN}[${_i}]${NC} $(component_field "$_key" 2)"
+    _i=$((_i + 1))
+  done
+  echo -e "  ${CYAN}[a]${NC} All of the above"
+  echo -e "  ${CYAN}[n]${NC} None (core only: MetalLB + Ingress + Metrics-Server)"
   echo ""
-  read -rp "  Enter your choices (e.g. 1 2 or 4): " choices
+  read -rp "  Enter your choices (e.g. 1 3, or a): " choices
 
-  INSTALL_ARGOCD=false
-  INSTALL_JENKINS=false
-  INSTALL_MONITORING=false
-
-  for choice in $choices; do
-    case $choice in
-      1) INSTALL_ARGOCD=true ;;
-      2) INSTALL_JENKINS=true ;;
-      3) INSTALL_MONITORING=true ;;
-      4) INSTALL_ARGOCD=true; INSTALL_JENKINS=true; INSTALL_MONITORING=true ;;
-      5) ;;
-      *) warn "Unknown option: $choice (skipping)" ;;
+  SELECTED_COMPONENTS=""
+  local _c _k
+  for _c in $choices; do
+    case "$_c" in
+      a|A) SELECTED_COMPONENTS=$(component_keys | tr '\n' ' '); break ;;
+      n|N) SELECTED_COMPONENTS=""; break ;;
+      *)
+        if echo "$_c" | grep -qE '^[0-9]+$'; then
+          _k=$(component_key_at "$_c")
+          if [[ -n "$_k" ]]; then
+            SELECTED_COMPONENTS="${SELECTED_COMPONENTS}${_k} "
+          else
+            warn "Unknown option: $_c (skipping)"
+          fi
+        else
+          warn "Unknown option: $_c (skipping)"
+        fi
+        ;;
     esac
   done
 }
@@ -913,6 +895,7 @@ select_components() {
 #  SETUP CLUSTER
 # ─────────────────────────────────────────────
 setup_cluster() {
+  local _k
   check_dependencies
 
   LOG_FILE="/tmp/homelab-$(date +%Y%m%d-%H%M%S).log"
@@ -978,10 +961,10 @@ setup_cluster() {
   select_components
 
   # Install selected components
-  log "Installing optional components (ArgoCD=$INSTALL_ARGOCD Jenkins=$INSTALL_JENKINS Monitoring=$INSTALL_MONITORING)"
-  $INSTALL_ARGOCD    && install_argocd
-  $INSTALL_JENKINS   && install_jenkins
-  $INSTALL_MONITORING && install_monitoring
+  log "Installing optional components: ${SELECTED_COMPONENTS:-none}"
+  for _k in $SELECTED_COMPONENTS; do
+    install_component "$_k" || warn "$(component_field "$_k" 2) failed - continuing"
+  done
 
   # Summary
   log "=== Setup cluster finished ==="
@@ -993,10 +976,9 @@ setup_cluster() {
   echo -e "  ${OK} MetalLB"
   echo -e "  ${OK} Ingress-Nginx"
   echo -e "  ${OK} Metrics-Server"
-  $INSTALL_ARGOCD    && echo -e "  ${OK} ArgoCD     → http://argocd.local"
-  $INSTALL_JENKINS   && echo -e "  ${OK} Jenkins    → http://jenkins.local"
-  $INSTALL_MONITORING && echo -e "  ${OK} Grafana    → http://grafana.local"
-  $INSTALL_MONITORING && echo -e "  ${OK} Prometheus → http://prometheus.local"
+  for _k in $SELECTED_COMPONENTS; do
+    echo -e "  ${OK} $(component_field "$_k" 2)"
+  done
 
   print_hosts_reminder
 }
@@ -1005,6 +987,7 @@ setup_cluster() {
 #  ADD COMPONENTS TO EXISTING CLUSTER
 # ─────────────────────────────────────────────
 add_components() {
+  local _k
   if ! kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
     fail "Cluster '${CLUSTER_NAME}' does not exist. Run Setup first."
     return 1
@@ -1028,20 +1011,19 @@ add_components() {
   log "Prompting for optional components"
   select_components
 
-  log "Installing optional components (ArgoCD=$INSTALL_ARGOCD Jenkins=$INSTALL_JENKINS Monitoring=$INSTALL_MONITORING)"
-  $INSTALL_ARGOCD    && install_argocd
-  $INSTALL_JENKINS   && install_jenkins
-  $INSTALL_MONITORING && install_monitoring
+  log "Installing optional components: ${SELECTED_COMPONENTS:-none}"
+  for _k in $SELECTED_COMPONENTS; do
+    install_component "$_k" || warn "$(component_field "$_k" 2) failed - continuing"
+  done
 
   log "=== Add components finished ==="
   print_section "Done"
   echo -e "  ${OK} MetalLB"
   echo -e "  ${OK} Ingress-Nginx"
   echo -e "  ${OK} Metrics-Server"
-  $INSTALL_ARGOCD    && echo -e "  ${OK} ArgoCD     → http://argocd.local"
-  $INSTALL_JENKINS   && echo -e "  ${OK} Jenkins    → http://jenkins.local"
-  $INSTALL_MONITORING && echo -e "  ${OK} Grafana    → http://grafana.local"
-  $INSTALL_MONITORING && echo -e "  ${OK} Prometheus → http://prometheus.local"
+  for _k in $SELECTED_COMPONENTS; do
+    echo -e "  ${OK} $(component_field "$_k" 2)"
+  done
 
   print_hosts_reminder
 }
@@ -1073,7 +1055,7 @@ main_menu() {
   echo -e "  ${CYAN}[3]${NC} 📊  Show cluster status"
   echo -e "  ${CYAN}[4]${NC} ⏹   Stop cluster"
   echo -e "  ${CYAN}[5]${NC} ▶   Start cluster"
-  echo -e "  ${CYAN}[6]${NC} ➖  Uninstall optional components"
+  echo -e "  ${CYAN}[6]${NC} 🔧  Manage components (install / suspend / resume / remove)"
   echo -e "  ${CYAN}[7]${NC} 💣  Teardown / delete cluster"
   echo -e "  ${CYAN}[8]${NC} 🚪  Exit"
   echo ""
@@ -1085,7 +1067,7 @@ main_menu() {
     3) show_status ;;
     4) stop_cluster ;;
     5) start_cluster ;;
-    6) uninstall_components ;;
+    6) manage_components ;;
     7) teardown_cluster ;;
     8) echo ""; info "Goodbye!"; echo ""; exit 0 ;;
     *) warn "Invalid option. Please run the script again."; exit 1 ;;
