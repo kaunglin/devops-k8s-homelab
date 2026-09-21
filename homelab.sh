@@ -23,6 +23,12 @@ WARN="${YELLOW}⚠${NC}"
 CLUSTER_NAME="homelab"
 K8S_VERSION="v1.29.0"
 
+# Number of worker nodes. Each kind node is a container running its own
+# kubelet/containerd, so every extra worker costs ~300-400MB. Drop to 1 when
+# running heavy stacks (Istio, Vault, Consul) on a memory-constrained VM:
+#   WORKER_COUNT=1 ./homelab.sh
+WORKER_COUNT="${WORKER_COUNT:-2}"
+
 # Address that external machines/VMs use to reach the API server.
 # OrbStack assigns every container a routable *.orb.local domain that is
 # reachable from other OrbStack machines, so we default to the control-plane
@@ -166,14 +172,21 @@ nodes:
       - containerPort: 443
         hostPort: 443
         protocol: TCP
+EOF
+
+  # Worker nodes (WORKER_COUNT of them), each with its own /data host mount
+  local i
+  for (( i=1; i<=WORKER_COUNT; i++ )); do
+    cat <<EOF >> /tmp/kind-homelab.yaml
   - role: worker
     extraMounts:
-      - hostPath: /tmp/kind-worker1
+      - hostPath: /tmp/kind-worker${i}
         containerPath: /data
-  - role: worker
-    extraMounts:
-      - hostPath: /tmp/kind-worker2
-        containerPath: /data
+EOF
+    mkdir -p "/tmp/kind-worker${i}"
+  done
+
+  cat <<EOF >> /tmp/kind-homelab.yaml
 networking:
   # Bind the API server to all host interfaces so it is reachable from
   # other machines/VMs (e.g. OrbStack), not just the host's loopback.
@@ -182,8 +195,7 @@ networking:
   podSubnet: "10.244.0.0/16"
   serviceSubnet: "10.96.0.0/12"
 EOF
-  mkdir -p /tmp/kind-worker1 /tmp/kind-worker2
-  log "Kind config created (podSubnet: 10.244.0.0/16, serviceSubnet: 10.96.0.0/12)"
+  log "Kind config created (workers: ${WORKER_COUNT}, podSubnet: 10.244.0.0/16, serviceSubnet: 10.96.0.0/12)"
 }
 
 # ─────────────────────────────────────────────
@@ -203,10 +215,21 @@ get_metallb_ip_range() {
     subnet="172.18.0.0/16"
   fi
 
-  # Use the last /24 block for MetalLB (e.g. 172.18.0.0/16 -> 172.18.255.200-172.18.255.250)
-  local base
-  base=$(echo "$subnet" | cut -d'/' -f1 | cut -d'.' -f1,2)
-  echo "${base}.255.200-${base}.255.250"
+  # Carve the pool out of the *same* subnet the kind network actually uses.
+  # Docker Desktop hands out a /16 (172.18.0.0/16); OrbStack hands out a /24
+  # (e.g. 192.168.97.0/24), so the third octet cannot be hardcoded to 255.
+  local base prefix o1 o2 o3
+  base=${subnet%/*}
+  prefix=${subnet#*/}
+  IFS='.' read -r o1 o2 o3 _ <<< "$base"
+
+  if (( prefix >= 24 )); then
+    # /24 or narrower: take the top of the subnet's own third octet
+    echo "${o1}.${o2}.${o3}.200-${o1}.${o2}.${o3}.250"
+  else
+    # wider than /24: use the last /24 block of the range
+    echo "${o1}.${o2}.255.200-${o1}.${o2}.255.250"
+  fi
 }
 
 # ─────────────────────────────────────────────
@@ -807,7 +830,7 @@ teardown_cluster() {
       warn "Cluster may not have existed"
     log "Cleaning up temp files"
     rm -f /tmp/kind-homelab.yaml /tmp/jenkins-values.yaml /tmp/prom-values.yaml
-    rm -rf /tmp/kind-worker1 /tmp/kind-worker2
+    rm -rf /tmp/kind-worker[0-9]*
     success "Cleanup complete"
     log "=== Teardown finished ==="
   else
@@ -884,7 +907,7 @@ setup_cluster() {
     fi
   else
     create_kind_config
-    info "Creating kind cluster (1 control-plane + 2 workers)..."
+    info "Creating kind cluster (1 control-plane + ${WORKER_COUNT} worker(s))..."
     log "Creating kind cluster with config /tmp/kind-homelab.yaml"
     kind create cluster --config /tmp/kind-homelab.yaml --image "kindest/node:${K8S_VERSION}" 2>&1 | tee -a "$LOG_FILE" && \
       success "Cluster '${CLUSTER_NAME}' created"
