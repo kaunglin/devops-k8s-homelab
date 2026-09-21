@@ -538,6 +538,15 @@ grafana:
       cpu: "500m"
 
 prometheus:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    hosts:
+      - prometheus.local
+    paths:
+      - /
   prometheusSpec:
     resources:
       requests:
@@ -582,6 +591,9 @@ EOF
   echo -e "    URL      : ${YELLOW}http://grafana.local${NC}"
   echo -e "    Username : ${YELLOW}admin${NC}"
   echo -e "    Password : ${YELLOW}homelab123${NC}"
+  echo ""
+  echo -e "    ${BOLD}Prometheus:${NC}"
+  echo -e "    URL      : ${YELLOW}http://prometheus.local${NC}"
 }
 
 # ─────────────────────────────────────────────
@@ -686,6 +698,7 @@ print_hosts_reminder() {
   echo "127.0.0.1  argocd.local"
   echo "127.0.0.1  jenkins.local"
   echo "127.0.0.1  grafana.local"
+  echo "127.0.0.1  prometheus.local"
   echo -e "EOF'${NC}"
   echo ""
 }
@@ -921,6 +934,7 @@ setup_cluster() {
   $INSTALL_ARGOCD    && echo -e "  ${OK} ArgoCD     → http://argocd.local"
   $INSTALL_JENKINS   && echo -e "  ${OK} Jenkins    → http://jenkins.local"
   $INSTALL_MONITORING && echo -e "  ${OK} Grafana    → http://grafana.local"
+  $INSTALL_MONITORING && echo -e "  ${OK} Prometheus → http://prometheus.local"
 
   print_hosts_reminder
 }
@@ -965,6 +979,7 @@ add_components() {
   $INSTALL_ARGOCD    && echo -e "  ${OK} ArgoCD     → http://argocd.local"
   $INSTALL_JENKINS   && echo -e "  ${OK} Jenkins    → http://jenkins.local"
   $INSTALL_MONITORING && echo -e "  ${OK} Grafana    → http://grafana.local"
+  $INSTALL_MONITORING && echo -e "  ${OK} Prometheus → http://prometheus.local"
 
   print_hosts_reminder
 }

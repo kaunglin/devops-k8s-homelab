@@ -12,7 +12,7 @@ A single script to run a local Kubernetes homelab on [kind](https://kind.sigs.k8
 - **Optional components** (you choose during setup or when adding components):
   - **ArgoCD** – GitOps CD (UI at `http://argocd.local`).
   - **Jenkins** – CI (UI at `http://jenkins.local`).
-  - **Prometheus + Grafana** – Monitoring (Grafana at `http://grafana.local`).
+  - **Prometheus + Grafana** – Monitoring (Grafana at `http://grafana.local`, Prometheus at `http://prometheus.local`).
 
 The script also supports **stopping** and **starting** the cluster (Docker containers), **uninstalling** optional components, and **teardown** (delete cluster and cleanup).
 
@@ -55,6 +55,7 @@ For ArgoCD, Jenkins, and Grafana to resolve, add to `/etc/hosts`:
 127.0.0.1  argocd.local
 127.0.0.1  jenkins.local
 127.0.0.1  grafana.local
+127.0.0.1  prometheus.local
 ```
 
 The script prints a reminder and the exact lines after setup or when adding components.
