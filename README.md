@@ -81,6 +81,9 @@ The path is printed at the start. Helm and key commands are logged so you can tr
 ## Default credentials (optional components)
 
 - **ArgoCD:** admin / (password from `argocd-initial-admin-secret`).
+  Set `ARGOCD_ADMIN_PASSWORD` in a local `.env` (copy `.env.example`) to keep the
+  same password across reinstalls — the script bcrypt-hashes it and passes only
+  the hash to Helm. `.env` is gitignored; never commit it.
 - **Jenkins:** admin / `homelab123`.
 - **Grafana:** admin / `homelab123`.
 

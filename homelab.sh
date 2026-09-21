@@ -29,6 +29,17 @@ K8S_VERSION="v1.29.0"
 #   WORKER_COUNT=1 ./homelab.sh
 WORKER_COUNT="${WORKER_COUNT:-2}"
 
+# Local overrides, never committed (.env is gitignored). Set
+# ARGOCD_ADMIN_PASSWORD there to keep one Argo CD admin password across
+# reinstalls instead of a fresh random one each time. See .env.example.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${SCRIPT_DIR}/.env"
+  set +a
+fi
+
 # Address that external machines/VMs use to reach the API server.
 # OrbStack assigns every container a routable *.orb.local domain that is
 # reachable from other OrbStack machines, so we default to the control-plane
@@ -396,9 +407,33 @@ install_argocd() {
   helm repo update &>/dev/null
   ensure_namespace "$NS_ARGOCD"
 
+  # Always write a values file (empty is fine) so the helm call stays a single
+  # fixed shape -- bash 3.2 on macOS cannot expand an empty array under set -u.
+  local pass_mode="random"
+  : > /tmp/argocd-values.yaml
+  if [[ -n "${ARGOCD_ADMIN_PASSWORD:-}" ]]; then
+    if command -v htpasswd &>/dev/null; then
+      local pw_hash pw_mtime
+      pw_hash=$(htpasswd -nbBC 10 "" "$ARGOCD_ADMIN_PASSWORD" | tr -d ':\n' | sed 's/^\$2y/\$2a/')
+      pw_mtime=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      cat <<EOF > /tmp/argocd-values.yaml
+configs:
+  secret:
+    argocdServerAdminPassword: "${pw_hash}"
+    argocdServerAdminPasswordMtime: "${pw_mtime}"
+EOF
+      pass_mode="fixed"
+      log "Using ARGOCD_ADMIN_PASSWORD from .env (bcrypt hash passed to Helm)"
+    else
+      warn "htpasswd not found - falling back to ArgoCD's random password"
+      log "htpasswd missing; ARGOCD_ADMIN_PASSWORD ignored"
+    fi
+  fi
+
   helm upgrade --install argocd argo/argo-cd \
     --namespace "$NS_ARGOCD" \
     --version "$ARGOCD_HELM_VERSION" \
+    --values /tmp/argocd-values.yaml \
     --set server.service.type=ClusterIP \
     --set configs.params."server\.insecure"=true \
     --wait \
@@ -432,8 +467,12 @@ EOF
   wait_for_pods "$NS_ARGOCD" "app.kubernetes.io/name=argocd-server" 180
 
   local argocd_pass
-  argocd_pass=$(kubectl -n "$NS_ARGOCD" get secret argocd-initial-admin-secret \
-    -o jsonpath="{.data.password}" 2>/dev/null | base64 -d 2>/dev/null || echo "run: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d")
+  if [[ "$pass_mode" == "fixed" ]]; then
+    argocd_pass="(from ARGOCD_ADMIN_PASSWORD in .env - unchanged across reinstalls)"
+  else
+    argocd_pass=$(kubectl -n "$NS_ARGOCD" get secret argocd-initial-admin-secret \
+      -o jsonpath="{.data.password}" 2>/dev/null | base64 -d 2>/dev/null || echo "run: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d")
+  fi
 
   success "ArgoCD ready"
   echo ""
