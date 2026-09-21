@@ -23,6 +23,13 @@ WARN="${YELLOW}⚠${NC}"
 CLUSTER_NAME="homelab"
 K8S_VERSION="v1.29.0"
 
+# Address that external machines/VMs use to reach the API server.
+# OrbStack assigns every container a routable *.orb.local domain that is
+# reachable from other OrbStack machines, so we default to the control-plane
+# container's domain. Override with API_SERVER_HOST=<ip-or-host> if you'd
+# rather connect via the Mac's LAN IP or another address.
+API_SERVER_HOST="${API_SERVER_HOST:-${CLUSTER_NAME}-control-plane.orb.local}"
+
 METALLB_VERSION="0.14.5"
 INGRESS_NGINX_VERSION="4.10.1"
 METRICS_SERVER_VERSION="3.11.0"
@@ -143,6 +150,15 @@ nodes:
         nodeRegistration:
           kubeletExtraArgs:
             node-labels: "ingress-ready=true"
+      - |
+        kind: ClusterConfiguration
+        apiServer:
+          certSANs:
+            - "localhost"
+            - "127.0.0.1"
+            - "0.0.0.0"
+            - "host.docker.internal"
+            - "${API_SERVER_HOST}"
     extraPortMappings:
       - containerPort: 80
         hostPort: 80
@@ -159,6 +175,10 @@ nodes:
       - hostPath: /tmp/kind-worker2
         containerPath: /data
 networking:
+  # Bind the API server to all host interfaces so it is reachable from
+  # other machines/VMs (e.g. OrbStack), not just the host's loopback.
+  apiServerAddress: "0.0.0.0"
+  apiServerPort: 6443
   podSubnet: "10.244.0.0/16"
   serviceSubnet: "10.96.0.0/12"
 EOF
