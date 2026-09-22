@@ -16,6 +16,16 @@ A single script to run a local Kubernetes homelab on [kind](https://kind.sigs.k8
 
 The script also supports **stopping** and **starting** the cluster (Docker containers), **uninstalling** optional components, and **teardown** (delete cluster and cleanup).
 
+## Documentation
+
+| Document | Covers |
+|----------|--------|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Cluster layout, networking, the image registry, storage, memory budget |
+| [docs/CICD.md](docs/CICD.md) | How a git push becomes a running pod, stage by stage |
+| [docs/ARGOCD.md](docs/ARGOCD.md) | How Argo CD is installed, configured and kept out of trouble |
+| [docs/JENKINS.md](docs/JENKINS.md) | How Jenkins is installed, how builds run as pods, why Kaniko |
+| [docs/COMPONENTS.md](docs/COMPONENTS.md) | The component registry: adding components, install/suspend/resume/remove |
+
 ## Prerequisites
 
 - **Docker** (Docker Desktop or Engine running).

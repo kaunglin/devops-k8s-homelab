@@ -29,7 +29,10 @@ controller:
   # Kaniko instead) and blueocean (deprecated and heavy for a lab).
 persistence:
   enabled: true
-  size: 5Gi
+  # Matches the chart default and the volume already provisioned. A
+  # StatefulSet's volumeClaimTemplate is immutable, so changing this on a
+  # running Jenkins makes the upgrade fail rather than resizing anything.
+  size: 8Gi
 agent:
   enabled: true
   resources:
