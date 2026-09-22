@@ -1,8 +1,12 @@
 # Jenkins Helm values. Extracted from homelab.sh so the config is reviewable.
 # Admin password is set here for the lab; change it before exposing Jenkins.
 controller:
-  adminUser: admin
-  adminPassword: homelab123
+  # Chart 5.x moved these under controller.admin. The old adminUser/
+  # adminPassword keys are silently ignored, which leaves Jenkins with a
+  # random generated password instead of this one.
+  admin:
+    username: admin
+    password: homelab123
   serviceType: ClusterIP
   resources:
     requests:
@@ -12,13 +16,17 @@ controller:
       cpu: "1500m"
       memory: "2Gi"
   javaOpts: "-Xms512m -Xmx1024m"
+  # Plugins float on :latest, so the chart must ship a recent Jenkins core or
+  # the init container fails with "requires a greater version of Jenkins".
+  # That is why JENKINS_HELM_VERSION is kept current rather than pinned low.
   installPlugins:
-    - kubernetes:latest
-    - workflow-aggregator:latest
+    - kubernetes:latest            # provisions build agents as pods
+    - workflow-aggregator:latest   # declarative pipeline
     - git:latest
+    - credentials-binding:latest   # withCredentials() in the Jenkinsfile
     - configuration-as-code:latest
-    - blueocean:latest
-    - docker-workflow:latest
+  # Removed: docker-workflow (there is no Docker daemon in kind - builds use
+  # Kaniko instead) and blueocean (deprecated and heavy for a lab).
 persistence:
   enabled: true
   size: 5Gi

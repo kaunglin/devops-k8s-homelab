@@ -51,7 +51,7 @@ METALLB_VERSION="0.14.5"
 INGRESS_NGINX_VERSION="4.10.1"
 METRICS_SERVER_VERSION="3.11.0"
 ARGOCD_HELM_VERSION="6.7.18"
-JENKINS_HELM_VERSION="5.1.25"
+JENKINS_HELM_VERSION="5.9.63"
 PROM_STACK_HELM_VERSION="59.1.0"
 
 NS_METALLB="metallb-system"
@@ -406,11 +406,11 @@ install_metrics_server() {
 #   dynamic_values_<key>   echo a path to an extra values file (merged last)
 #   post_install_<key>     runs after a successful install
 #
-#   key|display|release|namespace|repo_name|repo_url|chart|version|values|hosts
+#   key|display|release|namespace|repo_name|repo_url|chart|version|values|hosts|timeout
 COMPONENTS=(
-  "argocd|ArgoCD (GitOps CD)|argocd|${NS_ARGOCD}|argo|https://argoproj.github.io/argo-helm|argo/argo-cd|${ARGOCD_HELM_VERSION}|argocd.yaml|argocd.local"
-  "jenkins|Jenkins (CI)|jenkins|${NS_JENKINS}|jenkins|https://charts.jenkins.io|jenkins/jenkins|${JENKINS_HELM_VERSION}|jenkins.yaml|jenkins.local"
-  "monitoring|Prometheus + Grafana|kube-prometheus-stack|${NS_MONITORING}|prometheus-community|https://prometheus-community.github.io/helm-charts|prometheus-community/kube-prometheus-stack|${PROM_STACK_HELM_VERSION}|monitoring.yaml|grafana.local,prometheus.local"
+  "argocd|ArgoCD (GitOps CD)|argocd|${NS_ARGOCD}|argo|https://argoproj.github.io/argo-helm|argo/argo-cd|${ARGOCD_HELM_VERSION}|argocd.yaml|argocd.local|10m"
+  "jenkins|Jenkins (CI)|jenkins|${NS_JENKINS}|jenkins|https://charts.jenkins.io|jenkins/jenkins|${JENKINS_HELM_VERSION}|jenkins.yaml|jenkins.local|25m"
+  "monitoring|Prometheus + Grafana|kube-prometheus-stack|${NS_MONITORING}|prometheus-community|https://prometheus-community.github.io/helm-charts|prometheus-community/kube-prometheus-stack|${PROM_STACK_HELM_VERSION}|monitoring.yaml|grafana.local,prometheus.local|15m"
 )
 
 # Annotation used to remember replica counts across a suspend/resume cycle.
@@ -548,11 +548,12 @@ post_install_monitoring() {
 # ─────────────────────────────────────────────
 install_component() {
   local key=$1
-  local display release ns repo_name repo_url chart version values base overlay
+  local display release ns repo_name repo_url chart version values base overlay timeout
   display=$(component_field "$key" 2);  release=$(component_field "$key" 3)
   ns=$(component_field "$key" 4);       repo_name=$(component_field "$key" 5)
   repo_url=$(component_field "$key" 6); chart=$(component_field "$key" 7)
   version=$(component_field "$key" 8);  values=$(component_field "$key" 9)
+  timeout=$(component_field "$key" 11); timeout="${timeout:-10m}"
 
   print_section "Installing ${display}"
   log "Installing ${key} (chart=${chart} version=${version} ns=${ns})"
@@ -574,18 +575,37 @@ install_component() {
   local rc=0
   if [[ -n "$base" && -n "$overlay" ]]; then
     helm upgrade --install "$release" "$chart" --namespace "$ns" --version "$version" \
-      --values "$base" --values "$overlay" --wait --timeout 10m &>/dev/null || rc=$?
+      --values "$base" --values "$overlay" --wait --timeout "$timeout" &>/dev/null || rc=$?
   elif [[ -n "$base" ]]; then
     helm upgrade --install "$release" "$chart" --namespace "$ns" --version "$version" \
-      --values "$base" --wait --timeout 10m &>/dev/null || rc=$?
+      --values "$base" --wait --timeout "$timeout" &>/dev/null || rc=$?
   else
     helm upgrade --install "$release" "$chart" --namespace "$ns" --version "$version" \
-      --wait --timeout 10m &>/dev/null || rc=$?
+      --wait --timeout "$timeout" &>/dev/null || rc=$?
   fi
+  # helm --wait can time out while the release still converges afterwards --
+  # Jenkins' first run downloads every plugin and regularly overruns. Treat a
+  # timeout as inconclusive and check the workloads before giving up, otherwise
+  # post_install never runs and the component is left without its Ingress.
   if [[ $rc -ne 0 ]]; then
-    fail "${display} install failed. Check: helm status ${release} -n ${ns}"
-    log "${key} install FAILED"
-    return 1
+    warn "helm returned ${rc} for ${display} (timeout is ${timeout}) - checking whether it converged anyway"
+    local waited=0
+    while [[ $waited -lt 300 ]]; do
+      if [[ "$(component_status "$key")" == "installed" ]] && \
+         [[ -z "$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | awk '$3!="Running" && $3!="Completed"')" ]] && \
+         [[ -n "$(kubectl get pods -n "$ns" --no-headers 2>/dev/null)" ]]; then
+        rc=0; break
+      fi
+      sleep 15
+      waited=$((waited + 15))
+    done
+    if [[ $rc -ne 0 ]]; then
+      fail "${display} install failed. Check: helm status ${release} -n ${ns}"
+      log "${key} install FAILED"
+      return 1
+    fi
+    warn "${display} became healthy after the helm timeout - continuing"
+    log "${key} converged after helm timeout"
   fi
   success "${display} installed"
   log "${key} installed"
