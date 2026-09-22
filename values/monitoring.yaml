@@ -1,7 +1,10 @@
 # kube-prometheus-stack values. Grafana and Prometheus are exposed through
 # nginx ingress at grafana.local / prometheus.local. Alertmanager is off.
 grafana:
-  adminPassword: homelab123
+  # adminPassword is NOT here. Set GRAFANA_ADMIN_PASSWORD in .env (gitignored)
+  # and the script layers it on at install time. Note the Grafana chart only
+  # applies it on a FRESH install; an existing Grafana keeps the password in
+  # its own user database.
   service:
     type: ClusterIP
   ingress:

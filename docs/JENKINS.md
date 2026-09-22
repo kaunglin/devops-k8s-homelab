@@ -5,7 +5,7 @@ pushes them to the local registry. It never talks to the Kubernetes API to
 deploy anything — that is Argo CD's job.
 
 - Chart `jenkins` **5.9.63**, Jenkins **2.568.3** (jdk21), namespace `jenkins`
-- UI: **http://jenkins.local**, user `admin`
+- UI: **http://jenkins.local**, user `admin` (password from `.env`)
 - Runs as a StatefulSet with an **8 Gi** PersistentVolumeClaim
 
 ## How it is installed
@@ -25,7 +25,7 @@ plugin from the update centre, which regularly takes longer than ten minutes.
 controller:
   admin:
     username: admin
-    password: homelab123
+    # password comes from JENKINS_ADMIN_PASSWORD in .env, never from Git
   serviceType: ClusterIP
   resources:
     requests: { cpu: "500m", memory: "1Gi" }

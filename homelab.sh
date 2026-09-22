@@ -487,6 +487,32 @@ EOF
   echo "$out"
 }
 
+# Jenkins' chart takes the admin password as a plain value, so it is layered
+# in from .env at install time rather than committed. Unset means the chart
+# generates a random one, readable from the jenkins Secret.
+dynamic_values_jenkins() {
+  [[ -z "${JENKINS_ADMIN_PASSWORD:-}" ]] && return 0
+  local out=/tmp/homelab-jenkins-secret.yaml
+  cat <<EOF > "$out"
+controller:
+  admin:
+    password: "${JENKINS_ADMIN_PASSWORD}"
+EOF
+  echo "$out"
+}
+
+# Same for Grafana. The chart only applies this on a fresh install; an
+# existing Grafana keeps whatever is in its own user database.
+dynamic_values_monitoring() {
+  [[ -z "${GRAFANA_ADMIN_PASSWORD:-}" ]] && return 0
+  local out=/tmp/homelab-grafana-secret.yaml
+  cat <<EOF > "$out"
+grafana:
+  adminPassword: "${GRAFANA_ADMIN_PASSWORD}"
+EOF
+  echo "$out"
+}
+
 create_ingress() {  # $1=name $2=namespace $3=host $4=service $5=port
   kubectl apply -f - <<EOF &>/dev/null
 apiVersion: networking.k8s.io/v1
@@ -532,14 +558,26 @@ post_install_jenkins() {
   create_ingress jenkins-ingress "$NS_JENKINS" jenkins.local jenkins 8080
   wait_for_pods "$NS_JENKINS" "app.kubernetes.io/component=jenkins-controller" 300
   echo ""
-  echo -e "    ${BOLD}Jenkins:${NC} ${YELLOW}http://jenkins.local${NC}  admin / ${YELLOW}homelab123${NC}"
+  local jpass
+  if [[ -n "${JENKINS_ADMIN_PASSWORD:-}" ]]; then
+    jpass="(JENKINS_ADMIN_PASSWORD from .env)"
+  else
+    jpass=$(kubectl get secret jenkins -n "$NS_JENKINS" -o jsonpath='{.data.jenkins-admin-password}' 2>/dev/null | base64 -d 2>/dev/null || echo "see the jenkins Secret")
+  fi
+  echo -e "    ${BOLD}Jenkins:${NC} ${YELLOW}http://jenkins.local${NC}  admin / ${YELLOW}${jpass}${NC}"
 }
 
 post_install_monitoring() {
   # Grafana and Prometheus ingresses come from values/monitoring.yaml
   wait_for_pods "$NS_MONITORING" "app.kubernetes.io/name=grafana" 180
   echo ""
-  echo -e "    ${BOLD}Grafana:${NC}    ${YELLOW}http://grafana.local${NC}  admin / ${YELLOW}homelab123${NC}"
+  local gpass
+  if [[ -n "${GRAFANA_ADMIN_PASSWORD:-}" ]]; then
+    gpass="(GRAFANA_ADMIN_PASSWORD from .env)"
+  else
+    gpass=$(kubectl get secret kube-prometheus-stack-grafana -n "$NS_MONITORING" -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d 2>/dev/null || echo "see the grafana Secret")
+  fi
+  echo -e "    ${BOLD}Grafana:${NC}    ${YELLOW}http://grafana.local${NC}  admin / ${YELLOW}${gpass}${NC}"
   echo -e "    ${BOLD}Prometheus:${NC} ${YELLOW}http://prometheus.local${NC}"
 }
 

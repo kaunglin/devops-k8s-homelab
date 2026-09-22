@@ -3,10 +3,15 @@
 controller:
   # Chart 5.x moved these under controller.admin. The old adminUser/
   # adminPassword keys are silently ignored, which leaves Jenkins with a
-  # random generated password instead of this one.
+  # randomly generated password instead of the configured one.
+  #
+  # The password is NOT here. Set JENKINS_ADMIN_PASSWORD in .env (gitignored)
+  # and the script layers it on at install time, so no credential reaches Git.
+  # Without it, Jenkins keeps the random password the chart generates:
+  #   kubectl get secret jenkins -n jenkins \
+  #     -o jsonpath='{.data.jenkins-admin-password}' | base64 -d
   admin:
     username: admin
-    password: homelab123
   serviceType: ClusterIP
   resources:
     requests:

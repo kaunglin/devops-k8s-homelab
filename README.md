@@ -139,10 +139,13 @@ The path is printed at the start. Helm and key commands are logged so you can tr
   Set `ARGOCD_ADMIN_PASSWORD` in a local `.env` (copy `.env.example`) to keep the
   same password across reinstalls — the script bcrypt-hashes it and passes only
   the hash to Helm. `.env` is gitignored; never commit it.
-- **Jenkins:** admin / `homelab123`.
-- **Grafana:** admin / `homelab123`.
+- **Jenkins:** admin / set `JENKINS_ADMIN_PASSWORD` in `.env`. Unset means the
+  chart generates a random one — read it from the `jenkins` Secret.
+- **Grafana:** admin / set `GRAFANA_ADMIN_PASSWORD` in `.env`.
 
-Change these in the script or in the cluster if you need different passwords.
+No password is stored in this repo. All three are read from a local `.env`
+(copy `.env.example`), which is gitignored — the script layers them onto the
+Helm values at install time so nothing lands in Git.
 
 ## Notes
 
