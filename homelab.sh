@@ -563,7 +563,17 @@ install_component() {
   ensure_namespace "$ns"
 
   base=""
-  [[ -n "$values" && -f "${SCRIPT_DIR}/values/${values}" ]] && base="${SCRIPT_DIR}/values/${values}"
+  if [[ -n "$values" ]]; then
+    if [[ -f "${SCRIPT_DIR}/values/${values}" ]]; then
+      base="${SCRIPT_DIR}/values/${values}"
+    else
+      # Installing with chart defaults is worse than failing: the component
+      # comes up subtly misconfigured and nothing says why.
+      fail "values/${values} not found under ${SCRIPT_DIR} - refusing to install ${display} with chart defaults"
+      log "${key} install ABORTED: missing values/${values}"
+      return 1
+    fi
+  fi
   overlay=""
   if declare -f "dynamic_values_${key}" >/dev/null; then
     overlay=$("dynamic_values_${key}")
@@ -572,23 +582,42 @@ install_component() {
   # Explicit branches instead of an args array: bash 3.2 on macOS cannot
   # expand an empty array under set -u.
   info "Running helm upgrade --install ${release} (this can take a few minutes)..."
-  local rc=0
+  # helm output goes to the log, never /dev/null: the one time it matters is
+  # when the install fails, and that is exactly when it was being discarded.
+  local helm_out="/tmp/homelab-helm-${key}.log"
+  local rc=0 started
+  started=$(date +%s)
   if [[ -n "$base" && -n "$overlay" ]]; then
     helm upgrade --install "$release" "$chart" --namespace "$ns" --version "$version" \
-      --values "$base" --values "$overlay" --wait --timeout "$timeout" &>/dev/null || rc=$?
+      --values "$base" --values "$overlay" --wait --timeout "$timeout" >"$helm_out" 2>&1 || rc=$?
   elif [[ -n "$base" ]]; then
     helm upgrade --install "$release" "$chart" --namespace "$ns" --version "$version" \
-      --values "$base" --wait --timeout "$timeout" &>/dev/null || rc=$?
+      --values "$base" --wait --timeout "$timeout" >"$helm_out" 2>&1 || rc=$?
+  elif [[ -n "$overlay" ]]; then
+    helm upgrade --install "$release" "$chart" --namespace "$ns" --version "$version" \
+      --values "$overlay" --wait --timeout "$timeout" >"$helm_out" 2>&1 || rc=$?
   else
     helm upgrade --install "$release" "$chart" --namespace "$ns" --version "$version" \
-      --wait --timeout "$timeout" &>/dev/null || rc=$?
+      --wait --timeout "$timeout" >"$helm_out" 2>&1 || rc=$?
   fi
   # helm --wait can time out while the release still converges afterwards --
   # Jenkins' first run downloads every plugin and regularly overruns. Treat a
   # timeout as inconclusive and check the workloads before giving up, otherwise
   # post_install never runs and the component is left without its Ingress.
   if [[ $rc -ne 0 ]]; then
-    warn "helm returned ${rc} for ${display} (timeout is ${timeout}) - checking whether it converged anyway"
+    local elapsed=$(( $(date +%s) - started ))
+    [[ -n "${LOG_FILE:-}" ]] && cat "$helm_out" >> "$LOG_FILE" 2>/dev/null
+    # A failure in seconds is a real error (a values conflict, a bad chart), not
+    # a timeout. Only poll for late convergence when helm ran long enough that a
+    # timeout is plausible -- otherwise the convergence check happily reports
+    # success because the PREVIOUS release is still healthy.
+    if [[ $elapsed -lt 60 ]]; then
+      fail "${display} install failed after ${elapsed}s:"
+      tail -5 "$helm_out" 2>/dev/null | sed 's/^/      /'
+      log "${key} install FAILED after ${elapsed}s (see ${helm_out})"
+      return 1
+    fi
+    warn "helm returned ${rc} for ${display} after ${elapsed}s (timeout ${timeout}) - checking whether it converged anyway"
     local waited=0
     while [[ $waited -lt 300 ]]; do
       if [[ "$(component_status "$key")" == "installed" ]] && \
@@ -600,8 +629,9 @@ install_component() {
       waited=$((waited + 15))
     done
     if [[ $rc -ne 0 ]]; then
-      fail "${display} install failed. Check: helm status ${release} -n ${ns}"
-      log "${key} install FAILED"
+      fail "${display} install failed:"
+      tail -5 "$helm_out" 2>/dev/null | sed 's/^/      /'
+      log "${key} install FAILED (see ${helm_out})"
       return 1
     fi
     warn "${display} became healthy after the helm timeout - continuing"

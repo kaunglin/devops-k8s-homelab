@@ -5,6 +5,18 @@
 #
 # The admin password is NOT here. Set ARGOCD_ADMIN_PASSWORD in .env and the
 # script layers a generated bcrypt hash on top of this file at install time.
+#
+# This only works on a FRESH install. Once Argo CD has generated its own
+# password, argocd-server owns .data.admin.password in the argocd-secret
+# Secret, and a Helm upgrade fails with "conflict occurred while applying
+# object argocd/argocd-secret". To change the password on a running instance,
+# patch the Secret directly instead:
+#
+#   HASH=$(htpasswd -nbBC 10 "" "$ARGOCD_ADMIN_PASSWORD" | tr -d ':\n' | sed 's/^\$2y/\$2a/')
+#   kubectl -n argocd patch secret argocd-secret -p "{\"stringData\":{
+#     \"admin.password\":\"${HASH}\",
+#     \"admin.passwordMtime\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}"
+#   kubectl -n argocd rollout restart deploy/argocd-server
 server:
   service:
     type: ClusterIP
