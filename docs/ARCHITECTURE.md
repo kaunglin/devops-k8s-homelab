@@ -148,3 +148,9 @@ The VM ceiling is the real design constraint. Roughly:
 
 Everything cannot run at once, which is why components are suspended rather
 than uninstalled — scaling to zero frees the memory while keeping all state.
+
+## Next
+
+- [CICD.md](CICD.md) — how a `git push` becomes a running pod
+- [JENKINS.md](JENKINS.md) / [ARGOCD.md](ARGOCD.md) — the build and deploy halves
+- [COMPONENTS.md](COMPONENTS.md) — adding, suspending and removing components

@@ -154,6 +154,10 @@ One Pipeline job, `sample-app`:
   "Couldn't find any revision to build"
 - Script path: `Jenkinsfile`
 - Credentials: none (public repo)
+- **Triggers: none.** A push does not start a build — click **Build Now**. To
+  change that, tick *Poll SCM* or declare `triggers { pollSCM('H/2 * * * *') }`
+  in the Jenkinsfile. A GitHub webhook would be instant but needs Jenkins
+  reachable from the internet, which a local cluster is not.
 
 Because the Jenkinsfile lives in the repo, changing the pipeline is a commit —
 no job reconfiguration.

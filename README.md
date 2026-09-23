@@ -18,6 +18,9 @@ The script also supports **stopping** and **starting** the cluster (Docker conta
 
 ## Documentation
 
+Start at **[docs/README.md](docs/README.md)** — it has a reading order and a
+quick-answers table.
+
 | Document | Covers |
 |----------|--------|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Cluster layout, networking, the image registry, storage, memory budget |
