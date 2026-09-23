@@ -54,6 +54,12 @@ than assumed.
 **2. Ingress-Nginx** holds the first pool address, `192.168.97.200`, and also
 binds hostPort 80/443 on the control-plane node.
 
+Because it uses hostPort and is pinned to one node, its rollout must be
+`maxSurge=0`: a replacement pod cannot bind port 80 while the old one still
+holds it, so the default surge-first rollout deadlocks with the new pod
+`Pending` and Helm stuck in `pending-upgrade`. Recovering means
+`helm rollback ingress-nginx <last-good-revision>` before retrying.
+
 **3. OrbStack routes the container network to macOS**, which Docker Desktop
 does not. That means MetalLB IPs are reachable directly from the Mac over
 TCP — verified with `curl http://192.168.97.200/`. ICMP does not pass, so

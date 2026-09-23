@@ -52,7 +52,7 @@ INGRESS_NGINX_VERSION="4.10.1"
 METRICS_SERVER_VERSION="3.11.0"
 ARGOCD_HELM_VERSION="6.7.18"
 JENKINS_HELM_VERSION="5.9.63"
-PROM_STACK_HELM_VERSION="59.1.0"
+PROM_STACK_HELM_VERSION="91.5.0"
 
 NS_METALLB="metallb-system"
 NS_INGRESS="ingress-nginx"
@@ -348,6 +348,11 @@ install_ingress_nginx() {
       --set controller.tolerations[0].effect="NoSchedule" \
       --set controller.hostPort.enabled=true \
       --set controller.service.type=LoadBalancer \
+      --set controller.updateStrategy.rollingUpdate.maxSurge=0 \
+      --set controller.updateStrategy.rollingUpdate.maxUnavailable=1 \
+      --set controller.metrics.enabled=true \
+      --set controller.metrics.serviceMonitor.enabled=true \
+      --set controller.metrics.serviceMonitor.additionalLabels.release=kube-prometheus-stack \
       --wait \
       --timeout 5m 2>&1 | tee -a "${LOG_FILE:-/dev/null}"
     if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
@@ -410,7 +415,7 @@ install_metrics_server() {
 COMPONENTS=(
   "argocd|ArgoCD (GitOps CD)|argocd|${NS_ARGOCD}|argo|https://argoproj.github.io/argo-helm|argo/argo-cd|${ARGOCD_HELM_VERSION}|argocd.yaml|argocd.local|10m"
   "jenkins|Jenkins (CI)|jenkins|${NS_JENKINS}|jenkins|https://charts.jenkins.io|jenkins/jenkins|${JENKINS_HELM_VERSION}|jenkins.yaml|jenkins.local|25m"
-  "monitoring|Prometheus + Grafana|kube-prometheus-stack|${NS_MONITORING}|prometheus-community|https://prometheus-community.github.io/helm-charts|prometheus-community/kube-prometheus-stack|${PROM_STACK_HELM_VERSION}|monitoring.yaml|grafana.local,prometheus.local|15m"
+  "monitoring|kube-prometheus-stack (Prometheus + Grafana)|kube-prometheus-stack|${NS_MONITORING}|prometheus-community|https://prometheus-community.github.io/helm-charts|prometheus-community/kube-prometheus-stack|${PROM_STACK_HELM_VERSION}|monitoring.yaml|grafana.local,prometheus.local|15m"
 )
 
 # Annotation used to remember replica counts across a suspend/resume cycle.
