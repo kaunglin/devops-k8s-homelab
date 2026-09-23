@@ -176,6 +176,7 @@ kubectl patch app sample-app -n argocd --type merge \
 | `401` on push | Wrong or truncated token in the `github-token` credential |
 | Kaniko `http: server gave HTTP response to HTTPS client` | `--insecure --skip-tls-verify` missing |
 | Argo CD shows an old revision | Has not polled yet — refresh |
+| `jenkins-0` stuck `Init:1/2` after a cluster restart | Stale emptyDir — `kubectl delete pod jenkins-0 -n jenkins` (see [JENKINS.md](JENKINS.md)) |
 | Pod `ImagePullBackOff` on `localhost:5001/...` | containerd `certs.d` missing on that node |
 
 ## What makes this production-shaped

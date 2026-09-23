@@ -158,6 +158,32 @@ One Pipeline job, `sample-app`:
 Because the Jenkinsfile lives in the repo, changing the pipeline is a commit —
 no job reconfiguration.
 
+## After a cluster stop/start: init container back-off
+
+Stopping and starting the cluster restarts the containers **inside the existing
+pod**, so `jenkins-0` keeps its identity and its `emptyDir` volumes. The init
+container then re-runs against a `/var/jenkins_plugins` that is already
+populated from the previous run, the `set -e` script dies at the plugin-copy
+step without printing `finished initialization`, and the pod sits in
+`Init:1/2` with `BackOff restarting failed container init`. The main containers
+show `exitCode 255 / reason Unknown`, which is just how they were stopped.
+
+Recovery is one line — the StatefulSet recreates the pod with fresh emptyDirs,
+while `jenkins-home` is the PVC and keeps jobs, credentials and config:
+
+```bash
+kubectl delete pod jenkins-0 -n jenkins
+```
+
+Note the log fills with `cp: overwrite '...jpi'?` prompts. Those are **not**
+the fault: the chart runs `yes n | cp -i`, which answers them deliberately to
+preserve existing plugins.
+
+`controller.overwritePlugins` does not help — the rendered copy command is
+identical either way. `controller.initializeOnce: true` would skip plugin
+initialisation entirely after the first install and avoid the path, at the
+cost of plugin-list changes no longer applying on upgrade.
+
 ## Lifecycle
 
 Jenkins holds real state in its 8 Gi volume: job configuration, build history,
